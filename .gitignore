@@ -1,0 +1,18 @@
+# Environment variables for Stramyt Music API
+# Add this file to .gitignore to keep your secrets safe
+
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.coverage
+.pytest_cache/
+venv/
+.venv/
+ENV/
+env/
+.DS_Store
+Thumbs.db
