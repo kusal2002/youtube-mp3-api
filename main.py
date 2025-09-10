@@ -91,32 +91,53 @@ async def homepage(request: Request):
     """Serve the homepage with API information"""
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "version": "1.0.0",
-        "endpoints_count": "12"
+        "version": "2.0.0",
+        "endpoints_count": "15"
     })
 
 # Standard yt-dlp configuration to avoid bot detection
 def get_ydl_opts(search=False):
-    """Get standard yt-dlp options with bot detection avoidance"""
+    """Get standard yt-dlp options with advanced bot detection avoidance"""
     opts = {
         'quiet': True,
         'no_warnings': True,
-        # Headers to avoid bot detection
+        # Advanced headers to mimic real browser
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'referer': 'https://www.youtube.com/',
+        'http_headers': {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        },
         # Extractor arguments to bypass restrictions
         'extractor_args': {
             'youtube': {
-                'skip': ['dash', 'hls'],
+                'skip': ['dash'],  # Only skip dash, keep hls
                 'player_skip': ['js'],
+                'player_client': ['android', 'web'],  # Use multiple clients
+                'include_dash_manifest': False,
             }
         },
-        # Retry configuration
-        'retries': 3,
-        'fragment_retries': 3,
-        # Rate limiting
-        'sleep_interval': 1,
-        'max_sleep_interval': 5,
+        # Advanced retry and rate limiting
+        'retries': 5,
+        'fragment_retries': 5,
+        'socket_timeout': 30,
+        'sleep_interval': 2,
+        'max_sleep_interval': 10,
+        'sleep_interval_subtitles': 1,
+        # Use cookies if available
+        'cookiesfrombrowser': None,
+        # Additional options to avoid detection
+        'ignoreerrors': False,
+        'no_check_certificate': True,
+        'prefer_insecure': False,
     }
     
     if search:
@@ -126,10 +147,89 @@ def get_ydl_opts(search=False):
         })
     else:
         opts.update({
-            'format': 'bestaudio',
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio',
         })
     
     return opts
+
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats"""
+    import re
+    patterns = [
+        r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
+        r'([a-zA-Z0-9_-]{11})'  # Just the ID itself
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+@app.get("/stream_safe", summary="Safe streaming with video ID extraction", tags=["Streaming"])
+async def stream_safe(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Ultra-safe streaming endpoint that uses video ID extraction
+    and multiple bypass techniques.
+    """
+    
+    # Extract video ID and create clean URL
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Try the most reliable method first
+    try:
+        # Use simple approach that often bypasses detection
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestaudio[ext=m4a]',
+            'user_agent': 'com.google.android.youtube/17.36.4',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                }
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            if info and info.get('url'):
+                audio_url = info['url']
+                
+                # Simple streaming without complex FFmpeg
+                command = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'quiet',
+                    '-i', audio_url,
+                    '-f', 'mp3', '-ab', '128k',
+                    '-vn', 'pipe:1'
+                ]
+                
+                proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                
+                def generate():
+                    try:
+                        while True:
+                            chunk = proc.stdout.read(4096)
+                            if not chunk:
+                                break
+                            yield chunk
+                    finally:
+                        if proc.poll() is None:
+                            proc.terminate()
+                
+                return StreamingResponse(
+                    generate(), 
+                    media_type="audio/mpeg",
+                    headers={'Content-Disposition': f'inline; filename="{video_id}.mp3"'}
+                )
+                
+    except Exception as e:
+        # Fallback to robust method
+        return await stream_robust(clean_url)
 
 @app.get("/health")
 async def health_check():
@@ -261,40 +361,101 @@ async def save_playlist_to_supabase(url: str = Query(..., description="YouTube M
 async def stream_mp3(url: str = Query(..., description="YouTube video URL")):
     """
     Stream the audio of a YouTube video as MP3 using yt-dlp and FFmpeg.
+    Uses multiple fallback methods to avoid bot detection.
     """
-    ydl_opts = get_ydl_opts(search=False)
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            if not info:
-                raise HTTPException(status_code=404, detail="Video not found or unavailable")
+    # Try multiple extraction methods
+    extraction_methods = [
+        # Method 1: Standard with Android client
+        {
+            **get_ydl_opts(search=False),
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                    'skip': ['dash'],
+                }
+            }
+        },
+        # Method 2: Web client with different format
+        {
+            **get_ydl_opts(search=False),
+            'format': 'bestaudio[ext=m4a]',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web'],
+                    'skip': ['dash'],
+                }
+            }
+        },
+        # Method 3: iOS client
+        {
+            **get_ydl_opts(search=False),
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios'],
+                    'skip': ['dash', 'hls'],
+                }
+            }
+        },
+        # Method 4: Basic extraction
+        {
+            'quiet': True,
+            'format': 'worst[ext=m4a]/worst',
+            'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+        }
+    ]
+    
+    audio_url = None
+    extraction_error = None
+    
+    # Try each method until one works
+    for i, ydl_opts in enumerate(extraction_methods):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
                 
-            # Get the best audio URL
-            audio_url = info.get('url')
-            if not audio_url:
-                # Try to get from formats
-                formats = info.get('formats', [])
-                audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                if audio_formats:
-                    audio_url = audio_formats[0]['url']
-                else:
-                    raise HTTPException(status_code=404, detail="No audio stream found")
-
-    except Exception as e:
-        error_msg = str(e)
-        if "Sign in to confirm you're not a bot" in error_msg:
-            raise HTTPException(
-                status_code=429, 
-                detail="YouTube bot detection triggered. Try again later or use a different video."
-            )
-        elif "Video unavailable" in error_msg:
-            raise HTTPException(status_code=404, detail="Video is unavailable or private")
-        elif "Private video" in error_msg:
-            raise HTTPException(status_code=403, detail="Cannot access private videos")
+                if not info:
+                    continue
+                    
+                # Get the best audio URL
+                audio_url = info.get('url')
+                if not audio_url:
+                    # Try to get from formats
+                    formats = info.get('formats', [])
+                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                    if audio_formats:
+                        # Sort by quality and pick the best
+                        audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
+                        audio_url = audio_formats[0]['url']
+                
+                if audio_url:
+                    break  # Success! Exit the loop
+                    
+        except Exception as e:
+            extraction_error = str(e)
+            if i < len(extraction_methods) - 1:
+                # Not the last method, try next one
+                continue
+            else:
+                # Last method failed, handle error
+                break
+    
+    # If all methods failed, return appropriate error
+    if not audio_url:
+        if extraction_error:
+            if "Sign in to confirm you're not a bot" in extraction_error:
+                raise HTTPException(
+                    status_code=429, 
+                    detail="All extraction methods failed due to bot detection. Video may be restricted."
+                )
+            elif "Video unavailable" in extraction_error:
+                raise HTTPException(status_code=404, detail="Video is unavailable or private")
+            elif "Private video" in extraction_error:
+                raise HTTPException(status_code=403, detail="Cannot access private videos")
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to extract audio: {extraction_error}")
         else:
-            raise HTTPException(status_code=500, detail=f"Failed to extract video info: {error_msg}")
+            raise HTTPException(status_code=404, detail="No audio stream found")
 
     try:
         command = [
@@ -327,6 +488,97 @@ async def stream_mp3(url: str = Query(..., description="YouTube video URL")):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process audio: {str(e)}")
+
+@app.get("/stream_robust", summary="Robust streaming with multiple fallbacks", tags=["Streaming"])
+async def stream_robust(url: str = Query(..., description="YouTube video URL")):
+    """
+    More robust streaming endpoint that tries multiple extraction methods
+    and different audio qualities to bypass restrictions.
+    """
+    
+    # Multiple strategies with different priorities
+    strategies = [
+        # Strategy 1: Mobile client (often works better)
+        {
+            'name': 'Mobile Client',
+            'opts': {
+                'quiet': True,
+                'format': 'bestaudio[ext=m4a]',
+                'user_agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android'],
+                        'skip': ['dash'],
+                    }
+                }
+            }
+        },
+        # Strategy 2: Basic web extraction
+        {
+            'name': 'Basic Web',
+            'opts': {
+                'quiet': True,
+                'format': 'worst[ext=m4a]/worst',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+        },
+        # Strategy 3: Alternative extraction
+        {
+            'name': 'Alternative',
+            'opts': {
+                'quiet': True,
+                'format': 'bestaudio[filesize<50M]',
+                'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15',
+                'http_headers': {
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                }
+            }
+        }
+    ]
+    
+    for strategy in strategies:
+        try:
+            with yt_dlp.YoutubeDL(strategy['opts']) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info and info.get('url'):
+                    audio_url = info['url']
+                    
+                    # Stream with simple FFmpeg conversion
+                    command = [
+                        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                        '-i', audio_url,
+                        '-f', 'mp3', '-ab', '128k', '-ar', '44100',
+                        '-vn', 'pipe:1'
+                    ]
+                    
+                    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    
+                    def generate():
+                        try:
+                            while True:
+                                chunk = proc.stdout.read(8192)
+                                if not chunk:
+                                    break
+                                yield chunk
+                        finally:
+                            proc.terminate()
+                    
+                    return StreamingResponse(
+                        generate(), 
+                        media_type="audio/mpeg",
+                        headers={'Content-Disposition': f'inline; filename="audio.mp3"'}
+                    )
+                    
+        except Exception as e:
+            # Try next strategy
+            continue
+    
+    # All strategies failed
+    raise HTTPException(
+        status_code=503, 
+        detail="All streaming methods failed. Video may be restricted or unavailable."
+    )
 
 @app.get("/search", summary="Search and stream music as MP3", tags=["Search", "Streaming"])
 def search_and_stream(query: str = Query(..., description="Song or artist to search")):
