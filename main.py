@@ -16,17 +16,23 @@ load_dotenv()
 # Templates for web interface
 templates = Jinja2Templates(directory="templates")
 
-# Supabase config (now loaded from .env file)
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Supabase config (now loaded from .env file or environment variables)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env file")
+    print("🚨 Environment Variables Missing!")
+    print("Required variables: SUPABASE_URL, SUPABASE_KEY")
+    print("In Koyeb: Create secrets and reference them in environment variables")
+    print("Example: SUPABASE_URL = @SUPABASE_URL (references secret)")
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set as environment variables or secrets")
 
-# JWT Secret for user authentication (loaded from .env)
-JWT_SECRET = os.getenv("JWT_SECRET")
+# JWT Secret for user authentication (loaded from environment)
+JWT_SECRET = os.environ.get("JWT_SECRET")
 if not JWT_SECRET:
-    raise ValueError("JWT_SECRET must be set in .env file")
+    print("🚨 JWT_SECRET environment variable missing!")
+    print("Create a secret in Koyeb and reference it: JWT_SECRET = @JWT_SECRET")
+    raise ValueError("JWT_SECRET must be set as environment variable or secret")
 
 # Initialize Supabase client with workaround for version compatibility
 try:
