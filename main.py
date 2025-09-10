@@ -7,6 +7,9 @@ import subprocess
 import os
 import re
 import jwt
+import requests
+import json
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -230,6 +233,335 @@ async def stream_safe(url: str = Query(..., description="YouTube video URL or vi
     except Exception as e:
         # Fallback to robust method
         return await stream_robust(clean_url)
+
+@app.get("/stream_ultimate", summary="Ultimate bypass with all methods", tags=["Streaming"])
+async def stream_ultimate(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Ultimate streaming endpoint that tries EVERYTHING to bypass restrictions.
+    Uses multiple libraries, APIs, and techniques.
+    """
+    
+    # Extract video ID
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    # Method 1: Direct API approach (often works when yt-dlp fails)
+    try:
+        # Use YouTube's internal API with mobile client
+        api_url = "https://www.youtube.com/youtubei/v1/player"
+        
+        # Multiple client configurations to try
+        clients = [
+            {
+                "clientName": "ANDROID",
+                "clientVersion": "17.36.4",
+                "userAgent": "com.google.android.youtube/17.36.4 (Linux; U; Android 11)"
+            },
+            {
+                "clientName": "IOS", 
+                "clientVersion": "17.33.2",
+                "userAgent": "com.google.ios.youtube/17.33.2 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)"
+            },
+            {
+                "clientName": "MWEB",
+                "clientVersion": "2.20221123.09.00"
+            }
+        ]
+        
+        for client in clients:
+            try:
+                payload = {
+                    "videoId": video_id,
+                    "context": {
+                        "client": client
+                    }
+                }
+                
+                headers = {
+                    'User-Agent': client.get('userAgent', 'Mozilla/5.0 (Linux; Android 11)'),
+                    'Content-Type': 'application/json',
+                    'X-YouTube-Client-Name': '3' if client['clientName'] == 'ANDROID' else '1',
+                    'X-YouTube-Client-Version': client['clientVersion']
+                }
+                
+                response = requests.post(api_url, json=payload, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Extract audio URL from response
+                    streaming_data = data.get('streamingData', {})
+                    
+                    # Try adaptive formats first
+                    adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                    for fmt in adaptive_formats:
+                        mime_type = fmt.get('mimeType', '')
+                        if 'audio' in mime_type and fmt.get('url'):
+                            audio_url = fmt['url']
+                            
+                            # Stream directly without yt-dlp
+                            return await stream_direct_url(audio_url, video_id)
+                    
+                    # Try regular formats
+                    formats = streaming_data.get('formats', [])
+                    for fmt in formats:
+                        if fmt.get('url'):
+                            audio_url = fmt['url']
+                            return await stream_direct_url(audio_url, video_id)
+                            
+            except Exception as e:
+                continue  # Try next client
+                
+    except Exception as e:
+        pass  # Continue to next method
+    
+    # Method 2: Embed page extraction
+    try:
+        embed_url = f"https://www.youtube.com/embed/{video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.youtube.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+        
+        response = requests.get(embed_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Look for player config
+            patterns = [
+                r'ytInitialPlayerResponse\s*=\s*({.+?});',
+                r'"streamingData":({.+?})',
+                r'var ytInitialPlayerResponse = ({.+?});'
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    try:
+                        if isinstance(match, str):
+                            data = json.loads(match)
+                            streaming_data = data.get('streamingData', {})
+                            
+                            # Extract audio URL
+                            for fmt in streaming_data.get('adaptiveFormats', []):
+                                if 'audio' in fmt.get('mimeType', '') and fmt.get('url'):
+                                    return await stream_direct_url(fmt['url'], video_id)
+                                    
+                    except:
+                        continue
+                        
+    except Exception as e:
+        pass
+    
+    # Method 3: Fallback to enhanced yt-dlp with extreme settings
+    try:
+        # Most aggressive yt-dlp configuration
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'worst[ext=m4a]/worst[ext=mp3]/worst',  # Use worst quality for better success
+            'user_agent': 'Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36',
+            'referer': 'https://m.youtube.com/',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                    'skip': ['dash', 'hls'],
+                    'player_skip': ['configs', 'webpage', 'js'],
+                }
+            },
+            'http_headers': {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'identity',  # Don't use gzip to avoid detection
+                'Connection': 'keep-alive',
+                'DNT': '1'
+            },
+            'socket_timeout': 60,
+            'retries': 10,
+            'fragment_retries': 10,
+            'ignoreerrors': True,
+            'no_check_certificate': True,
+        }
+        
+        clean_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            if info and info.get('url'):
+                return await stream_direct_url(info['url'], video_id)
+                
+    except Exception as e:
+        pass
+    
+    # All methods failed
+    raise HTTPException(
+        status_code=503, 
+        detail=f"All extraction methods failed for video {video_id}. This video may be geo-blocked, age-restricted, or unavailable."
+    )
+
+async def stream_direct_url(audio_url: str, video_id: str):
+    """Stream audio directly from URL without yt-dlp processing"""
+    try:
+        # Method 1: Direct streaming (fastest)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+            'Range': 'bytes=0-'  # Support range requests
+        }
+        
+        # Check if URL is accessible
+        head_response = requests.head(audio_url, headers=headers, timeout=5)
+        
+        if head_response.status_code in [200, 206]:
+            # Stream directly without FFmpeg conversion
+            def generate_direct():
+                try:
+                    with requests.get(audio_url, headers=headers, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                yield chunk
+                except Exception as e:
+                    print(f"Direct streaming error: {e}")
+            
+            # Detect content type
+            content_type = head_response.headers.get('content-type', 'audio/mp4')
+            if 'mp4' in content_type or 'm4a' in content_type:
+                media_type = "audio/mp4"
+                filename = f"{video_id}.m4a"
+            else:
+                media_type = "audio/mpeg"
+                filename = f"{video_id}.mp3"
+            
+            return StreamingResponse(
+                generate_direct(),
+                media_type=media_type,
+                headers={'Content-Disposition': f'inline; filename="{filename}"'}
+            )
+        
+        # Method 2: FFmpeg conversion (if direct streaming fails)
+        command = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error',
+            '-i', audio_url,
+            '-f', 'mp3', '-ab', '96k',  # Lower bitrate for faster processing
+            '-vn', '-y', 'pipe:1'
+        ]
+        
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        def generate_converted():
+            try:
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait()
+        
+        return StreamingResponse(
+            generate_converted(),
+            media_type="audio/mpeg",
+            headers={'Content-Disposition': f'inline; filename="{video_id}.mp3"'}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stream audio: {str(e)}")
+
+@app.get("/test_extraction", summary="Test video extraction without streaming", tags=["Debug"])
+async def test_extraction(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Test endpoint to debug video extraction without actually streaming.
+    Returns extraction details and available formats.
+    """
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    results = {"video_id": video_id, "methods": []}
+    
+    # Test Method 1: YouTube API
+    try:
+        api_url = "https://www.youtube.com/youtubei/v1/player"
+        payload = {
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "17.36.4"
+                }
+            }
+        }
+        
+        response = requests.post(api_url, json=payload, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            streaming_data = data.get('streamingData', {})
+            
+            audio_formats = []
+            for fmt in streaming_data.get('adaptiveFormats', []):
+                if 'audio' in fmt.get('mimeType', ''):
+                    audio_formats.append({
+                        'itag': fmt.get('itag'),
+                        'mimeType': fmt.get('mimeType'),
+                        'bitrate': fmt.get('bitrate'),
+                        'has_url': bool(fmt.get('url'))
+                    })
+            
+            results["methods"].append({
+                "name": "YouTube API",
+                "status": "success",
+                "audio_formats_found": len(audio_formats),
+                "formats": audio_formats[:3]  # Show first 3
+            })
+        else:
+            results["methods"].append({
+                "name": "YouTube API", 
+                "status": "failed",
+                "error": f"HTTP {response.status_code}"
+            })
+            
+    except Exception as e:
+        results["methods"].append({
+            "name": "YouTube API",
+            "status": "failed", 
+            "error": str(e)
+        })
+    
+    # Test Method 2: yt-dlp
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'format': 'bestaudio',
+            'user_agent': 'com.google.android.youtube/17.36.4',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android'],
+                }
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            
+            results["methods"].append({
+                "name": "yt-dlp",
+                "status": "success",
+                "title": info.get('title', 'Unknown'),
+                "duration": info.get('duration'),
+                "has_audio_url": bool(info.get('url'))
+            })
+            
+    except Exception as e:
+        results["methods"].append({
+            "name": "yt-dlp",
+            "status": "failed",
+            "error": str(e)
+        })
+    
+    return results
 
 @app.get("/health")
 async def health_check():
