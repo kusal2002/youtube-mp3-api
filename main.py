@@ -990,6 +990,336 @@ async def debug_video(url: str = Query(..., description="YouTube video URL or vi
     
     return debug_results
 
+@app.get("/stream_direct", summary="Direct extraction bypass", tags=["Streaming"])
+async def stream_direct(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Most direct approach - extracts streaming URL from YouTube page source
+    without using yt-dlp or external services.
+    """
+    
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    # Method 1: Direct page source extraction
+    try:
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Use headers that mimic a real browser visit
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # Add a delay to avoid rate limiting
+        time.sleep(1)
+        
+        response = requests.get(video_url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            page_content = response.text
+            
+            # Extract player response from page
+            patterns = [
+                r'var ytInitialPlayerResponse = ({.+?});',
+                r'"ytInitialPlayerResponse":({.+?}),"',
+                r'ytInitialPlayerResponse":\s*({.+?})\s*[,}]',
+                r'ytInitialPlayerResponse=({.+?});',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, page_content)
+                for match in matches:
+                    try:
+                        player_data = json.loads(match)
+                        streaming_data = player_data.get('streamingData', {})
+                        
+                        # Look for audio formats
+                        adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                        
+                        # Find best audio format
+                        audio_formats = []
+                        for fmt in adaptive_formats:
+                            mime_type = fmt.get('mimeType', '')
+                            if 'audio' in mime_type and fmt.get('url'):
+                                audio_formats.append({
+                                    'url': fmt['url'],
+                                    'bitrate': fmt.get('averageBitrate', fmt.get('bitrate', 0)),
+                                    'mime': mime_type
+                                })
+                        
+                        if audio_formats:
+                            # Sort by bitrate and pick the best one
+                            best_audio = max(audio_formats, key=lambda x: x['bitrate'])
+                            audio_url = best_audio['url']
+                            
+                            # Stream directly
+                            return await stream_audio_direct(audio_url, video_id, "Direct-Page-Extract")
+                        
+                        # Also try regular formats if no adaptive formats
+                        formats = streaming_data.get('formats', [])
+                        for fmt in formats:
+                            if fmt.get('url'):
+                                audio_url = fmt['url']
+                                return await stream_audio_direct(audio_url, video_id, "Direct-Format")
+                                
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        continue
+                        
+    except Exception as e:
+        pass
+    
+    # Method 2: Try mobile page
+    try:
+        mobile_url = f"https://m.youtube.com/watch?v={video_id}"
+        mobile_headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5'
+        }
+        
+        response = requests.get(mobile_url, headers=mobile_headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Look for any streaming URLs in mobile page
+            streaming_patterns = [
+                r'"url":"([^"]*googlevideo\.com[^"]*)"',
+                r'googlevideo\.com[^"\']*',
+                r'"signatureCipher":"([^"]*)"'
+            ]
+            
+            for pattern in streaming_patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    if 'googlevideo.com' in match:
+                        # Clean up the URL
+                        clean_url = match.replace('\\u0026', '&').replace('\/', '/')
+                        if 'mime=audio' in clean_url or 'itag=140' in clean_url:
+                            return await stream_audio_direct(clean_url, video_id, "Mobile-Extract")
+                            
+    except Exception as e:
+        pass
+    
+    # Method 3: Try embed page
+    try:
+        embed_url = f"https://www.youtube.com/embed/{video_id}"
+        embed_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.youtube.com/'
+        }
+        
+        response = requests.get(embed_url, headers=embed_headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Look for player config in embed
+            embed_patterns = [
+                r'"url":"([^"]*googlevideo\.com[^"]*audio[^"]*)"',
+                r'"url":"([^"]*itag=140[^"]*)"',  # itag 140 is audio
+                r'googlevideo\.com[^"\']*audio[^"\']*'
+            ]
+            
+            for pattern in embed_patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    if 'googlevideo.com' in match:
+                        clean_url = match.replace('\\u0026', '&').replace('\/', '/')
+                        return await stream_audio_direct(clean_url, video_id, "Embed-Extract")
+                        
+    except Exception as e:
+        pass
+    
+    # Method 4: Try getting info via different endpoint
+    try:
+        # Try the get_video_info endpoint (sometimes still works)
+        info_url = f"https://www.youtube.com/get_video_info?video_id={video_id}&el=embedded&ps=default&eurl="
+        info_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(info_url, headers=info_headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Parse the response (it's URL encoded)
+            from urllib.parse import parse_qs, unquote
+            
+            data = parse_qs(response.text)
+            
+            # Look for streaming data
+            if 'player_response' in data:
+                player_response = json.loads(data['player_response'][0])
+                streaming_data = player_response.get('streamingData', {})
+                
+                adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                for fmt in adaptive_formats:
+                    if 'audio' in fmt.get('mimeType', '') and fmt.get('url'):
+                        return await stream_audio_direct(fmt['url'], video_id, "VideoInfo-API")
+                        
+    except Exception as e:
+        pass
+    
+    # All direct methods failed
+    raise HTTPException(
+        status_code=503,
+        detail=f"All direct extraction methods failed for video {video_id}. The video exists but audio streams are not accessible through direct methods."
+    )
+
+async def stream_audio_direct(audio_url: str, video_id: str, method: str):
+    """Stream audio directly from extracted URL"""
+    try:
+        # Test if the URL is accessible
+        test_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Range': 'bytes=0-1023'
+        }
+        
+        test_response = requests.head(audio_url, headers=test_headers, timeout=5)
+        
+        if test_response.status_code in [200, 206, 416]:
+            # URL is accessible, stream directly
+            def generate_direct_audio():
+                try:
+                    stream_headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                    
+                    with requests.get(audio_url, headers=stream_headers, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                yield chunk
+                                
+                except Exception as e:
+                    print(f"Direct audio streaming error: {e}")
+            
+            # Determine file type from URL or headers
+            content_type = test_response.headers.get('content-type', '')
+            if 'mp4' in content_type or 'm4a' in audio_url:
+                media_type = "audio/mp4"
+                filename = f"{video_id}_{method}.m4a"
+            elif 'webm' in content_type or 'webm' in audio_url:
+                media_type = "audio/webm" 
+                filename = f"{video_id}_{method}.webm"
+            else:
+                media_type = "audio/mpeg"
+                filename = f"{video_id}_{method}.mp3"
+            
+            return StreamingResponse(
+                generate_direct_audio(),
+                media_type=media_type,
+                headers={
+                    'Content-Disposition': f'inline; filename="{filename}"',
+                    'X-Extraction-Method': method
+                }
+            )
+        
+        else:
+            # URL not directly accessible, try with FFmpeg
+            command = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '-i', audio_url,
+                '-f', 'mp3', '-ab', '128k', '-vn', 'pipe:1'
+            ]
+            
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            def generate_converted_audio():
+                try:
+                    while True:
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    if proc.poll() is None:
+                        proc.terminate()
+            
+            return StreamingResponse(
+                generate_converted_audio(),
+                media_type="audio/mpeg",
+                headers={
+                    'Content-Disposition': f'inline; filename="{video_id}_{method}.mp3"',
+                    'X-Extraction-Method': f"{method}-Converted"
+                }
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stream via {method}: {str(e)}")
+
+@app.get("/simple_stream", summary="Simplest possible streaming", tags=["Streaming"])
+async def simple_stream(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Absolutely simplest streaming approach - just tries to get any working audio URL
+    """
+    
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    # Super simple approach - just get the page and look for any audio URL
+    try:
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Minimal headers to avoid detection
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(video_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Look for any googlevideo.com URLs that contain audio
+            audio_patterns = [
+                r'(https://[^"\']*googlevideo\.com[^"\']*audio[^"\']*)',
+                r'(https://[^"\']*googlevideo\.com[^"\']*itag=140[^"\']*)',
+                r'(https://[^"\']*googlevideo\.com[^"\']*mime=audio[^"\']*)'
+            ]
+            
+            for pattern in audio_patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    clean_url = match.replace('\\u0026', '&').replace('\/', '/')
+                    
+                    # Test if this URL works
+                    try:
+                        test_response = requests.head(clean_url, headers=headers, timeout=3)
+                        if test_response.status_code in [200, 206]:
+                            # This URL works, stream it
+                            def simple_generate():
+                                with requests.get(clean_url, headers=headers, stream=True) as r:
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            yield chunk
+                            
+                            return StreamingResponse(
+                                simple_generate(),
+                                media_type="audio/mp4",
+                                headers={'Content-Disposition': f'inline; filename="{video_id}_simple.m4a"'}
+                            )
+                    except:
+                        continue
+        
+        # If direct extraction fails, return a helpful error
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not find accessible audio stream for video {video_id}. Video may require sign-in or be geo-restricted."
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Simple streaming failed: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
