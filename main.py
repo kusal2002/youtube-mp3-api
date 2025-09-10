@@ -3,7 +3,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import yt_dlp
 import subprocess
-from supabase import create_client, Client
 import os
 import re
 import jwt
@@ -20,12 +19,31 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env file")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 # JWT Secret for user authentication (loaded from .env)
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not JWT_SECRET:
     raise ValueError("JWT_SECRET must be set in .env file")
+
+# Initialize Supabase client with workaround for version compatibility
+try:
+    from supabase import create_client, Client
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except TypeError as e:
+    if "proxy" in str(e) or "unexpected keyword argument" in str(e):
+        # Workaround for version compatibility issues
+        print("Using compatibility workaround for Supabase client")
+        import httpx
+        from supabase.lib.client_options import ClientOptions
+        
+        # Create a custom httpx client
+        custom_http_client = httpx.Client()
+        
+        # Import and initialize SyncClient directly
+        from supabase._sync.client import SyncClient
+        options = ClientOptions()
+        supabase = SyncClient(SUPABASE_URL, SUPABASE_KEY, options)
+    else:
+        raise
 
 security = HTTPBearer()
 
@@ -57,6 +75,10 @@ This API allows you to:
 """,
     version="1.0.0"
 )
+
+@app.get("/")
+async def root():
+    return {"message": "Music Stream API is running"}
 
 @app.get("/search_results", summary="Search for multiple tracks (songs only)", tags=["Search"])
 async def search_results(
@@ -97,6 +119,7 @@ async def search_results(
             if len(results) >= limit:
                 break
     return {"results": results}
+
 @app.get("/playlist_info", summary="Get YouTube Music playlist info", tags=["YouTube Music"])
 async def get_playlist_info(url: str = Query(..., description="YouTube Music playlist URL")):
     """
@@ -128,7 +151,6 @@ async def get_playlist_info(url: str = Query(..., description="YouTube Music pla
         ]
     }
     return JSONResponse(content=playlist)
-
 
 @app.post("/save_playlist", summary="Save playlist and tracks to Supabase", tags=["Supabase"])
 async def save_playlist_to_supabase(url: str = Query(..., description="YouTube Music playlist URL")):
@@ -391,3 +413,7 @@ async def get_my_playlist_tracks(playlist_id: str = Query(...), user_id: str = D
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
