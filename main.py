@@ -563,6 +563,433 @@ async def test_extraction(url: str = Query(..., description="YouTube video URL o
     
     return results
 
+@app.get("/stream_proxy", summary="Stream via proxy services", tags=["Streaming"])
+async def stream_proxy(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Stream using alternative proxy services when YouTube blocks direct access.
+    Uses Invidious, Piped, and other YouTube proxy services.
+    """
+    
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    # Alternative services that can bypass YouTube restrictions
+    services_to_try = [
+        # Service 1: Invidious instances
+        {
+            'name': 'Invidious',
+            'instances': [
+                'https://invidious.io',
+                'https://yewtu.be', 
+                'https://invidious.kavin.rocks',
+                'https://vid.puffyan.us'
+            ]
+        },
+        # Service 2: Piped instances  
+        {
+            'name': 'Piped',
+            'instances': [
+                'https://pipedapi.kavin.rocks',
+                'https://api.piped.video'
+            ]
+        }
+    ]
+    
+    for service in services_to_try:
+        for instance in service['instances']:
+            try:
+                if service['name'] == 'Invidious':
+                    # Try Invidious API
+                    api_url = f"{instance}/api/v1/videos/{video_id}"
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                    
+                    response = requests.get(api_url, headers=headers, timeout=10)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Get audio formats
+                        adaptive_formats = data.get('adaptiveFormats', [])
+                        for fmt in adaptive_formats:
+                            if fmt.get('type', '').startswith('audio'):
+                                audio_url = fmt.get('url')
+                                if audio_url:
+                                    return await stream_from_proxy_url(audio_url, video_id, f"Invidious-{instance}")
+                
+                elif service['name'] == 'Piped':
+                    # Try Piped API
+                    api_url = f"{instance}/streams/{video_id}"
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                    
+                    response = requests.get(api_url, headers=headers, timeout=10)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Get audio streams
+                        audio_streams = data.get('audioStreams', [])
+                        if audio_streams:
+                            audio_url = audio_streams[0].get('url')
+                            if audio_url:
+                                return await stream_from_proxy_url(audio_url, video_id, f"Piped-{instance}")
+                                
+            except Exception as e:
+                # Try next instance
+                continue
+    
+    # If proxy services fail, try direct extraction with different approach
+    try:
+        # Last resort: Use youtube-dl style extraction with different user agent
+        headers = {
+            'User-Agent': 'yt-dlp/2023.07.06',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate'
+        }
+        
+        # Try to get video page with different headers
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        response = requests.get(video_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Look for any streaming URLs in the page
+            patterns = [
+                r'"url":"([^"]*audioonly[^"]*)"',
+                r'"url":"([^"]*audio[^"]*)"',
+                r'{"url":"([^"]*)"[^}]*"mimeType":"audio',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    # Decode URL
+                    audio_url = match.replace('\\u0026', '&').replace('\/', '/')
+                    if 'googlevideo.com' in audio_url:
+                        return await stream_from_proxy_url(audio_url, video_id, "Direct-Extraction")
+                        
+    except Exception as e:
+        pass
+    
+    # All methods failed
+    raise HTTPException(
+        status_code=503,
+        detail=f"All proxy services failed for video {video_id}. Video may be geo-blocked, age-restricted, or removed."
+    )
+
+async def stream_from_proxy_url(audio_url: str, video_id: str, service_name: str):
+    """Stream audio from proxy service URL"""
+    try:
+        # First check if URL is accessible
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.youtube.com/',
+            'Range': 'bytes=0-1023'  # Test with small range first
+        }
+        
+        test_response = requests.head(audio_url, headers=headers, timeout=5)
+        
+        if test_response.status_code in [200, 206, 416]:  # 416 = Range not satisfiable but file exists
+            # Stream directly without conversion for speed
+            def generate_proxy_stream():
+                try:
+                    stream_headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': 'https://www.youtube.com/'
+                    }
+                    
+                    with requests.get(audio_url, headers=stream_headers, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                yield chunk
+                                
+                except Exception as e:
+                    print(f"Proxy streaming error: {e}")
+            
+            # Detect format from URL or content type
+            content_type = test_response.headers.get('content-type', '')
+            if 'mp4' in content_type or 'm4a' in audio_url:
+                media_type = "audio/mp4"
+                filename = f"{video_id}_via_{service_name}.m4a"
+            elif 'webm' in content_type or 'webm' in audio_url:
+                media_type = "audio/webm"
+                filename = f"{video_id}_via_{service_name}.webm"
+            else:
+                media_type = "audio/mpeg"
+                filename = f"{video_id}_via_{service_name}.mp3"
+            
+            return StreamingResponse(
+                generate_proxy_stream(),
+                media_type=media_type,
+                headers={
+                    'Content-Disposition': f'inline; filename="{filename}"',
+                    'X-Service-Used': service_name
+                }
+            )
+        else:
+            # URL not accessible, try with FFmpeg conversion
+            command = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '-referer', 'https://www.youtube.com/',
+                '-i', audio_url,
+                '-f', 'mp3', '-ab', '128k', '-vn', 'pipe:1'
+            ]
+            
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            def generate_converted_proxy():
+                try:
+                    while True:
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    if proc.poll() is None:
+                        proc.terminate()
+            
+            return StreamingResponse(
+                generate_converted_proxy(),
+                media_type="audio/mpeg",
+                headers={
+                    'Content-Disposition': f'inline; filename="{video_id}_via_{service_name}.mp3"',
+                    'X-Service-Used': service_name
+                }
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stream from {service_name}: {str(e)}")
+
+@app.get("/stream_fallback", summary="Ultimate fallback with all methods", tags=["Streaming"])
+async def stream_fallback(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Ultimate fallback that tries every possible method in sequence:
+    1. Direct YouTube API
+    2. Proxy services (Invidious, Piped)
+    3. Enhanced yt-dlp
+    4. Direct page scraping
+    """
+    
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    # Try each method in order of success probability
+    methods = [
+        ("Proxy Services", lambda: stream_proxy(url)),
+        ("Ultimate Extraction", lambda: stream_ultimate(url)),
+        ("Safe Method", lambda: stream_safe(url)),
+        ("Robust Method", lambda: stream_robust(url))
+    ]
+    
+    errors = []
+    
+    for method_name, method_func in methods:
+        try:
+            result = await method_func()
+            # If we get here, the method succeeded
+            return result
+            
+        except HTTPException as e:
+            errors.append(f"{method_name}: {e.detail}")
+            continue
+        except Exception as e:
+            errors.append(f"{method_name}: {str(e)}")
+            continue
+    
+    # All methods failed, return comprehensive error
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "message": f"All extraction methods failed for video {video_id}",
+            "video_id": video_id,
+            "methods_tried": len(methods),
+            "errors": errors,
+            "suggestions": [
+                "Video may be geo-blocked or age-restricted",
+                "Try a different video",
+                "Check if video is still available on YouTube",
+                "Some videos may require login to access"
+            ]
+        }
+    )
+
+@app.get("/debug_video", summary="Debug video availability", tags=["Debug"])
+async def debug_video(url: str = Query(..., description="YouTube video URL or video ID")):
+    """
+    Comprehensive debug endpoint to test video availability across all methods.
+    """
+    
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+    
+    debug_results = {
+        "video_id": video_id,
+        "video_url": f"https://www.youtube.com/watch?v={video_id}",
+        "timestamp": datetime.now().isoformat(),
+        "tests": []
+    }
+    
+    # Test 1: Basic video accessibility
+    try:
+        response = requests.get(f"https://www.youtube.com/watch?v={video_id}", timeout=10)
+        if response.status_code == 200:
+            if "Video unavailable" in response.text:
+                debug_results["tests"].append({
+                    "method": "Basic Access",
+                    "status": "FAILED",
+                    "error": "Video unavailable"
+                })
+            elif "Private video" in response.text:
+                debug_results["tests"].append({
+                    "method": "Basic Access", 
+                    "status": "FAILED",
+                    "error": "Private video"
+                })
+            elif "age-restricted" in response.text.lower():
+                debug_results["tests"].append({
+                    "method": "Basic Access",
+                    "status": "FAILED", 
+                    "error": "Age-restricted"
+                })
+            else:
+                debug_results["tests"].append({
+                    "method": "Basic Access",
+                    "status": "SUCCESS",
+                    "note": "Video page accessible"
+                })
+        else:
+            debug_results["tests"].append({
+                "method": "Basic Access",
+                "status": "FAILED",
+                "error": f"HTTP {response.status_code}"
+            })
+    except Exception as e:
+        debug_results["tests"].append({
+            "method": "Basic Access",
+            "status": "FAILED",
+            "error": str(e)
+        })
+    
+    # Test 2: YouTube oEmbed API
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        response = requests.get(oembed_url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            debug_results["tests"].append({
+                "method": "oEmbed API",
+                "status": "SUCCESS",
+                "title": data.get("title", "Unknown"),
+                "author": data.get("author_name", "Unknown")
+            })
+        else:
+            debug_results["tests"].append({
+                "method": "oEmbed API",
+                "status": "FAILED",
+                "error": f"HTTP {response.status_code}"
+            })
+    except Exception as e:
+        debug_results["tests"].append({
+            "method": "oEmbed API",
+            "status": "FAILED", 
+            "error": str(e)
+        })
+    
+    # Test 3: Invidious instances
+    invidious_instances = [
+        "https://invidious.io",
+        "https://yewtu.be",
+        "https://invidious.kavin.rocks"
+    ]
+    
+    for instance in invidious_instances:
+        try:
+            api_url = f"{instance}/api/v1/videos/{video_id}"
+            response = requests.get(api_url, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                audio_formats = [f for f in data.get('adaptiveFormats', []) if 'audio' in f.get('type', '')]
+                
+                debug_results["tests"].append({
+                    "method": f"Invidious ({instance})",
+                    "status": "SUCCESS",
+                    "title": data.get("title", "Unknown"),
+                    "length": data.get("lengthSeconds", 0),
+                    "audio_formats": len(audio_formats)
+                })
+                break  # Found working instance
+            else:
+                debug_results["tests"].append({
+                    "method": f"Invidious ({instance})",
+                    "status": "FAILED",
+                    "error": f"HTTP {response.status_code}"
+                })
+        except Exception as e:
+            debug_results["tests"].append({
+                "method": f"Invidious ({instance})",
+                "status": "FAILED",
+                "error": str(e)
+            })
+    
+    # Test 4: yt-dlp with different configs
+    yt_dlp_configs = [
+        {
+            "name": "Android Client",
+            "config": {
+                'quiet': True,
+                'extractor_args': {'youtube': {'player_client': ['android']}}
+            }
+        },
+        {
+            "name": "Basic Config",
+            "config": {
+                'quiet': True,
+                'format': 'worst'
+            }
+        }
+    ]
+    
+    for config in yt_dlp_configs:
+        try:
+            with yt_dlp.YoutubeDL(config["config"]) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                
+                debug_results["tests"].append({
+                    "method": f"yt-dlp ({config['name']})",
+                    "status": "SUCCESS",
+                    "title": info.get("title", "Unknown"),
+                    "duration": info.get("duration", 0),
+                    "has_audio_url": bool(info.get("url"))
+                })
+                break  # Found working config
+                
+        except Exception as e:
+            debug_results["tests"].append({
+                "method": f"yt-dlp ({config['name']})",
+                "status": "FAILED",
+                "error": str(e)[:200]  # Truncate long errors
+            })
+    
+    # Summary
+    successful_methods = [t for t in debug_results["tests"] if t["status"] == "SUCCESS"]
+    debug_results["summary"] = {
+        "total_methods_tested": len(debug_results["tests"]),
+        "successful_methods": len(successful_methods),
+        "success_rate": f"{len(successful_methods)}/{len(debug_results['tests'])}",
+        "recommendation": "Video appears accessible" if successful_methods else "Video may be restricted or unavailable"
+    }
+    
+    return debug_results
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
