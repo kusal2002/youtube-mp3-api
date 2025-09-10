@@ -95,6 +95,42 @@ async def homepage(request: Request):
         "endpoints_count": "12"
     })
 
+# Standard yt-dlp configuration to avoid bot detection
+def get_ydl_opts(search=False):
+    """Get standard yt-dlp options with bot detection avoidance"""
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        # Headers to avoid bot detection
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://www.youtube.com/',
+        # Extractor arguments to bypass restrictions
+        'extractor_args': {
+            'youtube': {
+                'skip': ['dash', 'hls'],
+                'player_skip': ['js'],
+            }
+        },
+        # Retry configuration
+        'retries': 3,
+        'fragment_retries': 3,
+        # Rate limiting
+        'sleep_interval': 1,
+        'max_sleep_interval': 5,
+    }
+    
+    if search:
+        opts.update({
+            'default_search': 'ytsearch',
+            'extract_flat': False,
+        })
+    else:
+        opts.update({
+            'format': 'bestaudio',
+        })
+    
+    return opts
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -117,16 +153,16 @@ async def search_results(
     """
     # Add 'music' to query to bias results toward songs
     search_query = f"{query} music"
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'ytsearch',
+    ydl_opts = get_ydl_opts(search=True)
+    ydl_opts.update({
         'noplaylist': True,
         'extract_flat': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit*2}:{search_query}", download=False)
-        entries = info.get('entries', [])
+    })
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch{limit*2}:{search_query}", download=False)
+            entries = info.get('entries', [])
         results = []
         for entry in entries:
             duration = entry.get('duration')
@@ -142,7 +178,17 @@ async def search_results(
                 })
             if len(results) >= limit:
                 break
-    return {"results": results}
+        return {"results": results}
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "Sign in to confirm you're not a bot" in error_msg:
+            raise HTTPException(
+                status_code=429, 
+                detail="YouTube bot detection triggered. Try again later or search for a different query."
+            )
+        else:
+            raise HTTPException(status_code=500, detail=f"Search failed: {error_msg}")
 
 @app.get("/playlist_info", summary="Get YouTube Music playlist info", tags=["YouTube Music"])
 async def get_playlist_info(url: str = Query(..., description="YouTube Music playlist URL")):
@@ -216,42 +262,71 @@ async def stream_mp3(url: str = Query(..., description="YouTube video URL")):
     """
     Stream the audio of a YouTube video as MP3 using yt-dlp and FFmpeg.
     """
-    ydl_opts = {
-        'format': 'bestaudio',
-        'quiet': True,
-        'no_warnings': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        audio_url = info['url']
+    ydl_opts = get_ydl_opts(search=False)
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                raise HTTPException(status_code=404, detail="Video not found or unavailable")
+                
+            # Get the best audio URL
+            audio_url = info.get('url')
+            if not audio_url:
+                # Try to get from formats
+                formats = info.get('formats', [])
+                audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                if audio_formats:
+                    audio_url = audio_formats[0]['url']
+                else:
+                    raise HTTPException(status_code=404, detail="No audio stream found")
 
-    command = [
-        'ffmpeg',
-        '-i', audio_url,
-        '-f', 'mp3',
-        '-vn',
-        '-ab', '128k',
-        '-ar', '44100',
-        'pipe:1'
-    ]
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
+    except Exception as e:
+        error_msg = str(e)
+        if "Sign in to confirm you're not a bot" in error_msg:
+            raise HTTPException(
+                status_code=429, 
+                detail="YouTube bot detection triggered. Try again later or use a different video."
+            )
+        elif "Video unavailable" in error_msg:
+            raise HTTPException(status_code=404, detail="Video is unavailable or private")
+        elif "Private video" in error_msg:
+            raise HTTPException(status_code=403, detail="Cannot access private videos")
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to extract video info: {error_msg}")
 
-    def generate():
-        try:
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            proc.stdout.close()
-            proc.terminate()
-            proc.wait()
+    try:
+        command = [
+            'ffmpeg',
+            '-i', audio_url,
+            '-f', 'mp3',
+            '-vn',
+            '-ab', '128k',
+            '-ar', '44100',
+            'pipe:1'
+        ]
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
 
-    headers = {
-        'Content-Disposition': 'inline; filename="stream.mp3"',
-    }
-    return StreamingResponse(generate(), media_type="audio/mpeg", headers=headers)
+        def generate():
+            try:
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.stdout.close()
+                proc.terminate()
+                proc.wait()
+
+        headers = {
+            'Content-Disposition': 'inline; filename="stream.mp3"',
+        }
+        return StreamingResponse(generate(), media_type="audio/mpeg", headers=headers)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process audio: {str(e)}")
 
 @app.get("/search", summary="Search and stream music as MP3", tags=["Search", "Streaming"])
 def search_and_stream(query: str = Query(..., description="Song or artist to search")):
