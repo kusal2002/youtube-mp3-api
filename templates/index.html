@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Music Stream API</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            flex: 1;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+        
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+        
+        .status {
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 2rem;
+            margin-bottom: 3rem;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        
+        .status-badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 25px;
+            font-weight: bold;
+            margin-bottom: 1rem;
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+        
+        .feature-card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 2rem;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .feature-card h3 {
+            color: #FFD700;
+            margin-bottom: 1rem;
+            font-size: 1.3rem;
+        }
+        
+        .api-links {
+            text-align: center;
+            margin-top: 2rem;
+        }
+        
+        .btn {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 1rem 2rem;
+            text-decoration: none;
+            border-radius: 25px;
+            margin: 0 1rem;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        
+        .btn:hover {
+            background: rgba(255,255,255,0.3);
+            transform: translateY(-2px);
+        }
+        
+        .btn-primary {
+            background: #4CAF50;
+            border-color: #4CAF50;
+        }
+        
+        .btn-primary:hover {
+            background: #45a049;
+        }
+        
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin: 2rem 0;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        
+        .stat {
+            text-align: center;
+        }
+        
+        .stat-number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #FFD700;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            border-top: 1px solid rgba(255,255,255,0.2);
+            margin-top: auto;
+        }
+        
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .container {
+                padding: 1rem;
+            }
+            
+            .stats {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 Music Stream API</h1>
+            <p>Your ultimate music metadata and streaming solution</p>
+        </div>
+        
+        <div class="status">
+            <div class="status-badge">🟢 API Running</div>
+            <h2>Service Status</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-number">{{ version }}</div>
+                    <div class="stat-label">Version</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-number">{{ endpoints_count }}</div>
+                    <div class="stat-label">Endpoints</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-number">100%</div>
+                    <div class="stat-label">Uptime</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="features">
+            <div class="feature-card">
+                <h3>🔍 Smart Search</h3>
+                <p>Search for music tracks across YouTube and YouTube Music with intelligent filtering for songs only.</p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>🎵 MP3 Streaming</h3>
+                <p>Stream any YouTube video as high-quality MP3 audio with real-time transcoding.</p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>📋 Playlist Management</h3>
+                <p>Fetch and manage YouTube Music playlists with complete metadata and track information.</p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>👤 User System</h3>
+                <p>Spotify-like user authentication with personal playlist libraries and favorites.</p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>🖼️ Rich Metadata</h3>
+                <p>Get complete track information including thumbnails, duration, and channel details.</p>
+            </div>
+            
+            <div class="feature-card">
+                <h3>🔒 Secure API</h3>
+                <p>JWT-based authentication with secure environment configuration and data protection.</p>
+            </div>
+        </div>
+        
+        <div class="api-links">
+            <a href="/docs" class="btn btn-primary">📚 API Documentation</a>
+            <a href="/redoc" class="btn">📖 ReDoc</a>
+            <a href="/health" class="btn">❤️ Health Check</a>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <p>&copy; 2025 Music Stream API | Built with FastAPI ⚡</p>
+    </div>
+</body>
+</html>

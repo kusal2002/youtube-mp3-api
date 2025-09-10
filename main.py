@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Query, HTTPException, Depends
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, Query, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import yt_dlp
 import subprocess
@@ -11,6 +12,9 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Templates for web interface
+templates = Jinja2Templates(directory="templates")
 
 # Supabase config (now loaded from .env file)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -76,9 +80,23 @@ This API allows you to:
     version="1.0.0"
 )
 
-@app.get("/")
-async def root():
-    return {"message": "Music Stream API is running"}
+@app.get("/", response_class=HTMLResponse)
+async def homepage(request: Request):
+    """Serve the homepage with API information"""
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "version": "1.0.0",
+        "endpoints_count": "12"
+    })
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.now().isoformat(),
+        "service": "Music Stream API"
+    }
 
 @app.get("/search_results", summary="Search for multiple tracks (songs only)", tags=["Search"])
 async def search_results(
